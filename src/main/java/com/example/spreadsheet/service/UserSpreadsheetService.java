@@ -13,6 +13,9 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Coordinates spreadsheet generation and upload to the configured S3 bucket.
+ */
 @Service
 public class UserSpreadsheetService {
 
@@ -33,6 +36,13 @@ public class UserSpreadsheetService {
         this.bucket = bucket;
     }
 
+    /**
+     * Creates a unique XLSX object under the {@code users/} key prefix and uploads it.
+     *
+     * @param users non-empty user list to include in the spreadsheet
+     * @return the generated S3 object key
+     * @throws org.springframework.web.server.ResponseStatusException if S3 rejects the upload
+     */
     public String createAndUpload(List<UserInfo> users) {
         byte[] spreadsheet = spreadsheetGenerator.generate(users);
         String objectKey = "users/" + UUID.randomUUID() + ".xlsx";

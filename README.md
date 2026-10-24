@@ -1,29 +1,49 @@
 # Spreadsheet Cloud API
 
-A Spring Boot API that creates XLSX spreadsheets from user data and uploads them to AWS S3, then serves processed report files stored in Google Cloud Storage.
+Spring Boot service for creating user-information spreadsheets in AWS S3 and returning processed report files from Google Cloud Storage (GCS).
 
-## Requirements and configuration
+> This repository contains the API, not the AWS Lambda or the spreadsheet-processing pipeline. The Lambda/process is expected to read the original object from S3, write its report to GCS, and then call this API to download that report.
 
-- Java 17+
-- Maven 3.9+
-- An AWS identity with permission to upload objects to the configured bucket. The AWS SDK uses its default credential provider chain (for example, environment variables, profiles, or an instance role).
-- Google Cloud Application Default Credentials with permission to read objects from the report bucket.
+For component responsibilities, sequence diagrams, cloud boundaries, and operational considerations, see [Architecture](docs/ARCHITECTURE.md).
 
-Configure `AWS_S3_BUCKET`, `GCS_REPORT_BUCKET`, and optionally `AWS_REGION` (defaults to `us-east-1`). For Google Cloud, configure Application Default Credentials in the runtime environment. Do not put cloud credentials in source control.
+## Requirements
 
-Run with:
+- Java 17 or later
+- Maven 3.9 or later
+- AWS credentials authorized to upload to the configured S3 bucket
+- Google Cloud Application Default Credentials (ADC) authorized to read from the configured GCS report bucket
+
+The AWS SDK uses its default credential provider chain. The Google Cloud client uses ADC. Assign only the required permissions to the runtime identity, and do not commit credentials to the repository.
+
+## Configuration and local run
+
+| Environment variable | Required | Default | Purpose |
+|---|---:|---|---|
+| `AWS_S3_BUCKET` | Yes | — | Destination bucket for generated user spreadsheets |
+| `GCS_REPORT_BUCKET` | Yes | — | Bucket from which the API reads processed reports |
+| `AWS_REGION` | No | `us-east-1` | AWS region used by the S3 client |
+| `PORT` | No | `8080` | HTTP server port |
+
+In PowerShell:
 
 ```powershell
 $env:AWS_S3_BUCKET = "your-s3-bucket"
 $env:GCS_REPORT_BUCKET = "your-gcs-report-bucket"
+$env:AWS_REGION = "us-east-1"
+# Configure AWS credentials using a profile, environment, or workload identity.
+# Configure Google Cloud ADC for the runtime identity.
 mvn spring-boot:run
 ```
 
-## Endpoints
+Run tests with `mvn test`.
+
+## REST API
 
 ### Create and upload a user spreadsheet
 
-`POST /api/spreadsheets/users` accepts a non-empty list of users and returns the S3 bucket and generated object key. Each user requires `firstName`, `lastName`, and a valid `email`; `phone` is optional.
+`POST /api/spreadsheets/users`
+
+The request must contain a non-empty `users` list. `firstName`, `lastName`, and a valid `email` are required for each user; `phone` is optional.
 
 ```json
 {
@@ -38,7 +58,7 @@ mvn spring-boot:run
 }
 ```
 
-The response has status `201 Created`:
+On success, the API responds with `201 Created` and returns the S3 bucket and generated object key:
 
 ```json
 {
@@ -47,9 +67,13 @@ The response has status `201 Created`:
 }
 ```
 
-### Download a processed report from Google Cloud Storage
+The object key contains a generated UUID, so a successful request creates a new object under the `users/` prefix.
 
-`POST /api/reports/download` is intended to be called by the processing Lambda after the report is available in GCS. It returns the object as an attachment.
+### Download a processed report from GCS
+
+`POST /api/reports/download`
+
+After the report exists in GCS, the Lambda or another authorized caller requests it by object name. The bucket is selected by `GCS_REPORT_BUCKET`, not supplied by the caller.
 
 ```json
 {
@@ -57,4 +81,16 @@ The response has status `201 Created`:
 }
 ```
 
-The report bucket is fixed by `GCS_REPORT_BUCKET`. The Lambda must have network access to this API and the service must have GCS object-read permission. Restrict access to the callback endpoint at the API gateway/network layer appropriate to your deployment.
+The response body contains the report bytes with attachment and content-type headers based on GCS object metadata. The Lambda caller receives these bytes in the HTTP response; this endpoint does not trigger Lambda, write the report to GCS, or copy the report to S3.
+
+### Validation and errors
+
+- Invalid or incomplete JSON input is rejected by Spring validation with `400 Bad Request`.
+- A report object that does not exist returns `404 Not Found`.
+- Cloud storage failures are reported as `502 Bad Gateway`.
+
+## Security and deployment notes
+
+The report endpoint has no built-in authentication. In a deployed environment, restrict access using an authenticated API gateway, network policy, or equivalent controls; do not expose it publicly without protection. The runtime AWS identity needs S3 upload permission for the configured bucket (ideally scoped to `users/*`); its GCP identity needs object-read permission for the report bucket. Use TLS for cloud and API traffic.
+
+Spreadsheet generation, S3 upload, and GCS report download currently hold complete file contents in memory. Apply request-size limits and appropriate instance memory sizing; large-file workloads may require streaming or a different transfer design.

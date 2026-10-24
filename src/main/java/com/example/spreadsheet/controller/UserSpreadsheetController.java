@@ -12,6 +12,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+/**
+ * HTTP boundary for creating and uploading spreadsheets containing user data.
+ */
 @RestController
 @RequestMapping("/api/spreadsheets")
 public class UserSpreadsheetController {
@@ -27,6 +30,12 @@ public class UserSpreadsheetController {
         this.bucket = bucket;
     }
 
+    /**
+     * Generates an XLSX workbook and uploads it to the configured S3 bucket.
+     *
+     * @param request validated user data to include in the workbook
+     * @return the destination bucket and generated S3 object key
+     */
     @PostMapping("/users")
     @ResponseStatus(HttpStatus.CREATED)
     public SpreadsheetCreatedResponse createUserSpreadsheet(

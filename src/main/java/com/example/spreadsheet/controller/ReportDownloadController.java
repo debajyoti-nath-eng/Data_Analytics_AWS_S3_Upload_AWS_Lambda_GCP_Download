@@ -15,6 +15,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
 
+/**
+ * HTTP boundary for downloading a processed report from the configured GCS bucket.
+ */
 @RestController
 @RequestMapping("/api/reports")
 public class ReportDownloadController {
@@ -25,6 +28,12 @@ public class ReportDownloadController {
         this.reportService = reportService;
     }
 
+    /**
+     * Returns the requested GCS object as an attachment.
+     *
+     * @param request GCS object name, normally supplied by the processing Lambda
+     * @return report bytes and download headers
+     */
     @PostMapping("/download")
     public ResponseEntity<ByteArrayResource> downloadReport(
             @Valid @RequestBody ReportDownloadRequest request

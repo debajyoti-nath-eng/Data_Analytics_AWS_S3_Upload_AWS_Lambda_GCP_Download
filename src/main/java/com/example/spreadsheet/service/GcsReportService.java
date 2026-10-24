@@ -9,6 +9,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
+/**
+ * Reads processed report objects from the deployment-configured GCS bucket.
+ */
 @Service
 public class GcsReportService {
 
@@ -22,6 +25,14 @@ public class GcsReportService {
         this.bucket = bucket;
     }
 
+    /**
+     * Fetches an object and its download metadata from GCS.
+     *
+     * @param objectName object key in the configured report bucket
+     * @return the report filename, content type, and bytes
+     * @throws org.springframework.web.server.ResponseStatusException with 404 if absent,
+     *         or 502 if GCS cannot be reached
+     */
     public DownloadedReport download(String objectName) {
         try {
             Blob blob = storage.get(BlobId.of(bucket, objectName));
@@ -51,6 +62,7 @@ public class GcsReportService {
         }
     }
 
+    /** Contents and response metadata for a report retrieved from GCS. */
     public record DownloadedReport(String filename, String contentType, byte[] content) {
     }
 }

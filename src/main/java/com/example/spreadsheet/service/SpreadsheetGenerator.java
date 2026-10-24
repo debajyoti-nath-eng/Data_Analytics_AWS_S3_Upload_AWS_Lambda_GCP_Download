@@ -10,9 +10,19 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.List;
 
+/**
+ * Converts user details into an XLSX workbook held in memory.
+ */
 @Component
 public class SpreadsheetGenerator {
 
+    /**
+     * Creates a workbook with one row per user and a header row.
+     *
+     * @param users user details to write
+     * @return the complete XLSX file as bytes
+     * @throws IllegalStateException if the workbook cannot be serialized
+     */
     public byte[] generate(List<UserInfo> users) {
         try (XSSFWorkbook workbook = new XSSFWorkbook();
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
