@@ -12,12 +12,19 @@ import java.util.List;
 
 /**
  * Converts user details into an XLSX workbook held in memory.
+ *
+ * <p>This class has no cloud dependency, so the workbook layout can be tested on its own. The
+ * column order below is the input contract for the downstream Lambda processor; changing it
+ * requires a matching change there.
  */
 @Component
 public class SpreadsheetGenerator {
 
     /**
      * Creates a workbook with one row per user and a header row.
+     *
+     * <p>Every value is written as a string cell, so input such as {@code =1+1} stays literal text
+     * and is not evaluated as a formula when the file is opened.
      *
      * @param users user details to write
      * @return the complete XLSX file as bytes
@@ -33,6 +40,7 @@ public class SpreadsheetGenerator {
             header.createCell(2).setCellValue("Email");
             header.createCell(3).setCellValue("Phone");
 
+            // Row 0 is the header, so user N is written to row N + 1.
             for (int index = 0; index < users.size(); index++) {
                 UserInfo user = users.get(index);
                 Row row = sheet.createRow(index + 1);
