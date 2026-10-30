@@ -1,121 +1,148 @@
-# Architecture
+# Architecture (High-Level Design)
+
+This document covers the system's parts, boundaries, and major decisions. For classes and step-by-step behavior, see [Design](DESIGN.md). For setup and API usage, see the [README](../README.md).
 
 ## Purpose and scope
 
-This Spring Boot application provides two HTTP operations:
+The system moves user data through a cross-cloud pipeline: data enters through an API, is stored in AWS, is processed by AWS Lambda, lands in Google Cloud Storage (GCS), and is retrieved through the same API.
 
-1. Accept basic user information, create an XLSX workbook, and upload it to AWS S3.
-2. Retrieve a processed report from a configured Google Cloud Storage (GCS) bucket and return it to the caller as an HTTP attachment.
-
-The application does **not** implement the Lambda function, spreadsheet processing, or movement of the original spreadsheet between cloud providers. The processing system is an external dependency.
+| In this repository | Outside this repository |
+|---|---|
+| REST endpoint that creates a spreadsheet and uploads it to S3 | The Lambda function and its processing logic |
+| REST endpoint that serves a processed report from GCS | The trigger that starts Lambda |
+| S3 and GCS client configuration | Creating buckets and IAM identities |
+| | Authentication, TLS, and the deployment platform |
 
 ## System context
 
 ```mermaid
 flowchart LR
-    Client[API client] -->|POST user data| API[Spring Boot API]
-    API -->|PutObject XLSX| S3[(AWS S3: input spreadsheet)]
-    S3 -->|Read input| Lambda[AWS Lambda / processing system]
-    Lambda -->|Write processed report| GCS[(Google Cloud Storage)]
+    Client[API client]
+    Lambda[AWS Lambda processor]
+    subgraph App[This repository]
+        API[Spring Boot API]
+    end
+    subgraph AWS
+        S3[(S3 input bucket)]
+    end
+    subgraph GCP
+        GCS[(GCS report bucket)]
+    end
+
+    Client -->|POST user data| API
+    API -->|PutObject XLSX| S3
+    S3 -.->|Read input| Lambda
+    Lambda -.->|Write processed file| GCS
     Lambda -->|POST object name| API
-    API -->|Read report object| GCS
-    API -->|Return report bytes| Lambda
+    API -->|Read object| GCS
 ```
 
-The second HTTP operation is a **download callback** invoked after processing. It does not invoke Lambda itself. The Lambda (or another authorized caller) must know the GCS object name and must call this API after the report is available.
+Solid arrows are behavior this repository implements or receives. Dotted arrows are the external processor's own work.
 
-## Request sequences
+**The API never calls Lambda.** Lambda is a client of the download endpoint, and that is the only link between them. The S3 object is the handoff from the API to the processor, and the HTTP call is the handoff back.
 
-### Spreadsheet creation and processing
+## End-to-end flow
 
 ```mermaid
 sequenceDiagram
     participant Client
     participant API as Spring Boot API
     participant S3 as AWS S3
-    participant Lambda as AWS Lambda / processor
+    participant Lambda as AWS Lambda
     participant GCS as Google Cloud Storage
 
-    Client->>API: POST /api/spreadsheets/users (user data)
-    API->>API: Validate request and generate XLSX
-    API->>S3: PutObject users/{UUID}.xlsx
-    S3-->>API: Upload result
+    Client->>API: POST /api/spreadsheets/users
+    API->>API: Validate, generate XLSX
+    API->>S3: PutObject users/{uuid}.xlsx
+    S3-->>API: Stored
     API-->>Client: 201 Created (bucket, objectKey)
-    Note over Lambda,S3: An external event or workflow triggers the processor
-    Lambda->>S3: Read original spreadsheet
+
+    Note over S3,Lambda: Asynchronous: external trigger starts the processor
+    S3->>Lambda: Input available
+    Lambda->>S3: Read spreadsheet
     Lambda->>GCS: Write processed report
+
     Lambda->>API: POST /api/reports/download (objectName)
-    API->>GCS: Read report from configured bucket
-    GCS-->>API: Report bytes and object metadata
-    API-->>Lambda: Attachment response with report bytes
+    API->>GCS: Read object from configured bucket
+    GCS-->>API: Metadata and bytes
+    API-->>Lambda: 200 OK with file attachment
 ```
 
-The application does not configure an S3 event notification, Lambda trigger, callback URL, or workflow. Those integrations must be configured separately. The callback returns the report to the HTTP caller; it does not put it back into S3.
+The two requests are independent. The client's call finishes when the upload does, and the API holds no state linking the upload to the later download. Any link between the two objects is the processor's naming choice.
 
-### Components
+## Logical components
 
-| Package / component | Responsibility |
+```mermaid
+flowchart TB
+    subgraph API[Spring Boot application]
+        C1[UserSpreadsheetController]
+        C2[ReportDownloadController]
+        S1[UserSpreadsheetService]
+        S2[GcsReportService]
+        G[SpreadsheetGenerator]
+        CFG[CloudStorageConfiguration]
+    end
+    C1 --> S1
+    S1 --> G
+    C2 --> S2
+    CFG -.->|S3Client| S1
+    CFG -.->|Storage| S2
+    S1 --> S3[(AWS S3)]
+    S2 --> GCS[(GCS)]
+```
+
+| Layer | Responsibility |
 |---|---|
-| `com.example.spreadsheet` | Spring Boot application entry point |
-| `config.CloudStorageConfiguration` | Creates AWS S3 and Google Cloud Storage SDK clients |
-| `controller.UserSpreadsheetController` | Validates and exposes the spreadsheet creation HTTP operation |
-| `controller.ReportDownloadController` | Exposes the report download operation and HTTP attachment headers |
-| `service.SpreadsheetGenerator` | Maps the user list into an in-memory XLSX workbook |
-| `service.UserSpreadsheetService` | Generates a unique S3 key and uploads the workbook |
-| `service.GcsReportService` | Reads report bytes and metadata from the configured GCS bucket |
-| `model` | HTTP request and response records |
+| Controller | Routes, request validation, response headers |
+| Service | Workbook generation, cloud calls, mapping failures to HTTP statuses |
+| Model | JSON contract and validation rules |
+| Config | Building the cloud clients and choosing their endpoints |
 
-Controllers handle HTTP concerns; services contain storage and workbook orchestration; models define the JSON contract. Cloud SDK clients are injected as Spring beans.
+The application is stateless: it has no database or session, and every durable artifact lives in S3 or GCS. Instances can therefore be scaled horizontally and replaced freely.
 
-## API contract summary
+## Key decisions
 
-| Method and path | Input | Success response | Cloud operation |
-|---|---|---|---|
-| `POST /api/spreadsheets/users` | JSON object containing non-empty `users` list | `201 Created`, JSON with S3 `bucket` and `objectKey` | S3 `PutObject` under `users/{UUID}.xlsx` |
-| `POST /api/reports/download` | JSON object containing non-blank `objectName` | `200 OK`, report bytes as attachment | GCS object lookup and content read from `GCS_REPORT_BUCKET` |
-
-The user record requires non-blank first and last names and an email-formatted address; phone is optional. For exact examples and environment setup, see the root [README](../README.md).
-
-## Configuration and identity
-
-`src/main/resources/application.properties` maps environment variables to Spring properties:
-
-| Spring property | Environment variable | Notes |
+| Decision | Reason | Trade-off |
 |---|---|---|
-| `app.aws.region` | `AWS_REGION` | Defaults to `us-east-1` |
-| `app.aws.s3.bucket` | `AWS_S3_BUCKET` | Required destination for uploaded workbooks |
-| `app.gcp.gcs.bucket` | `GCS_REPORT_BUCKET` | Required source for report downloads |
-| `server.port` | `PORT` | Defaults to `8080` |
+| Lambda calls the API, not the reverse | Processing is asynchronous, and only Lambda knows when the report is ready | Lambda needs network access to the API and must know the object name |
+| Generate UUID object keys | Requests cannot collide, and no user data appears in the key | A retried request creates a duplicate object |
+| Fix buckets in configuration | Callers cannot reach any other bucket | One deployment serves one bucket pair |
+| `POST` for the download | The object name is validated in the body and stays out of URLs and access logs | Less conventional than `GET`, and not cacheable |
+| Buffer files in memory | Simple code, and `Content-Length` is known up front | Memory use grows with file size |
+| Return `502` for all cloud failures | Tells callers the fault is upstream, without leaking details | Callers cannot tell a permission error from an outage; the log can |
+| Use the SDKs' default credential chains | No secrets in code or config, and workload identity works unchanged | A missing credential surfaces on the first request, not at startup |
 
-AWS credentials are resolved through the AWS SDK default credential provider chain. GCS credentials are resolved through Google Cloud Application Default Credentials. The deployment should supply workload identities or equivalent managed credentials; do not package long-lived keys in the application or repository.
+## Deployment
 
-Use least-privilege identities:
+The API runs as one or more stateless instances of an executable jar. It needs:
 
-- AWS: allow object upload to the configured bucket, preferably limited to the `users/*` key prefix.
-- GCP: allow reading report objects from the configured report bucket.
-- Lambda/caller: allow network access to the report API and authenticate through deployment infrastructure.
+- Outbound HTTPS to S3 and to GCS
+- Inbound HTTPS from clients and from Lambda
+- An AWS identity and a GCP identity
 
-## Error and data behavior
+If the API runs in AWS, the GCP identity should use workload identity federation instead of a downloaded service-account key.
 
-- Bean Validation rejects malformed requests with `400 Bad Request`.
-- A report object that is not found produces `404 Not Found`.
-- S3 or GCS SDK failures are mapped to `502 Bad Gateway`.
-- S3 object names are generated by the API and returned to the caller. The original workbook uses the XLSX media type.
-- Report download names derive from the final segment of `objectName`; the response content type uses GCS metadata or `application/octet-stream` when metadata is absent.
-- Workbook creation, S3 upload, and GCS download currently buffer the full content in memory. This is simple for small files; enforce payload and file-size limits in deployment, and consider streaming for large objects.
+## Security
 
-## Security and operational boundaries
+The application has **no authentication or authorization of its own**, so the deployment must provide them. This matters most for `POST /api/reports/download`, which returns any object in the report bucket to whoever can reach it. Put the API behind an authenticated gateway or private network, and use TLS for all traffic.
 
-There is no application-level authentication or authorization configured in this project. In particular, protect `POST /api/reports/download` behind an authenticated gateway, private network, or equivalent mechanism. The endpoint accepts an object name in a fixed bucket, but access control is still required to prevent unauthorized report retrieval.
+Grant each identity least privilege:
 
-Configure transport security (TLS), request-size/time limits, cloud identity permissions, monitoring, and deployment health checks in the hosting environment. Keep cloud credentials, bucket names for production, and other environment-specific values outside source control.
+| Identity | Permission | Scope |
+|---|---|---|
+| API, AWS | `s3:PutObject` | `arn:aws:s3:::<bucket>/users/*` |
+| API, GCP | `storage.objects.get` | The report bucket |
+| Lambda, AWS | `s3:GetObject` | The input bucket's `users/*` keys |
+| Lambda, GCP | `storage.objects.create` | The report bucket |
 
-## Local development and verification
+Spreadsheets contain names, email addresses, and phone numbers. Enable encryption at rest and a retention policy on both buckets. The application logs bucket and object names on failure, never spreadsheet contents.
 
-The service requires valid cloud configuration and credentials to execute real storage requests. Build and run the automated tests with:
+## Quality attributes
 
-```powershell
-mvn test
-```
-
-See the root [README](../README.md) for local environment variables and `mvn spring-boot:run` instructions.
+| Attribute | Current behavior | To go further |
+|---|---|---|
+| Scalability | Stateless, so it scales horizontally | Stream files to reduce memory per request |
+| Availability | Depends on S3 and GCS; there is no fallback | Add health checks to the deployment |
+| Resilience | The SDKs' default retries only | Add timeouts tuned to the deployment |
+| Observability | Logged errors with full cause | Add metrics and request tracing |
+| Large files | Limited by instance memory | Use presigned or signed URLs for direct transfer |

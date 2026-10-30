@@ -14,6 +14,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * HTTP boundary for creating and uploading spreadsheets containing user data.
+ *
+ * <p>This is the first half of the pipeline: the object it writes to S3 is the input for the
+ * external Lambda processor. Validation happens here through {@code @Valid}, so the service only
+ * ever receives well-formed users and an invalid request never reaches S3.
  */
 @RestController
 @RequestMapping("/api/spreadsheets")
@@ -22,6 +26,12 @@ public class UserSpreadsheetController {
     private final UserSpreadsheetService spreadsheetService;
     private final String bucket;
 
+    /**
+     * Creates the controller.
+     *
+     * @param spreadsheetService generates and uploads the workbook
+     * @param bucket S3 bucket name echoed back to the caller
+     */
     public UserSpreadsheetController(
             UserSpreadsheetService spreadsheetService,
             @Value("${app.aws.s3.bucket}") String bucket
